@@ -52,18 +52,69 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $os = Get-CimInstance Win32_OperatingSystem
 Write-Step "Система: $($os.Caption) ($($os.Version))"
 
-# 3. Компонент OpenSSH.Server
-Write-Step "Проверяю компонент OpenSSH Server..."
-$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-if (-not $cap) {
-    Write-Warn "Компонент не найден в списке — пробую установить напрямую."
-    Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' | Out-Null
-} elseif ($cap.State -eq 'Installed') {
-    Write-Step "OpenSSH Server уже установлен."
-} else {
-    Write-Step "Устанавливаю OpenSSH Server (может занять минуту)..."
-    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+# 3. Компонент OpenSSH.Server (с проверкой и запасным путём)
+function Test-SshdService {
+    return [bool](Get-Service -Name sshd -ErrorAction SilentlyContinue)
 }
+
+function Install-Win32OpenSSH {
+    $zip    = Join-Path $env:TEMP 'OpenSSH-Win64.zip'
+    $parent = 'C:\Program Files'
+    $dest   = Join-Path $parent 'OpenSSH'
+    $url    = 'https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip'
+
+    Write-Step "Скачиваю официальный Win32-OpenSSH..."
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+
+    Write-Step "Распаковываю..."
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $parent -Force
+
+    $extracted = Join-Path $parent 'OpenSSH-Win64'
+    if (-not (Test-Path $extracted)) { throw "После распаковки не найден каталог $extracted" }
+    Move-Item -Path $extracted -Destination $dest -Force
+
+    Write-Step "Регистрирую службу sshd (Install-sshd.ps1)..."
+    & (Join-Path $dest 'Install-sshd.ps1')
+}
+
+Write-Step "Проверяю компонент OpenSSH Server..."
+try {
+    $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+} catch {
+    $cap = $null
+    Write-Warn "Get-WindowsCapability недоступен: $($_.Exception.Message)"
+}
+
+$ready = Test-SshdService
+if (-not $ready -and $cap -and $cap.State -eq 'Installed') {
+    $ready = $true
+}
+
+if (-not $ready) {
+    if ($cap) {
+        Write-Step "Устанавливаю компонент OpenSSH Server (может занять минуту)..."
+        try {
+            Add-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warn "Компонент не установился: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Warn "Компонент OpenSSH.Server не найден в списке."
+    }
+    $ready = Test-SshdService
+}
+
+if (-not $ready) {
+    Write-Warn "Служба sshd не появилась — ставлю официальный Win32-OpenSSH."
+    Install-Win32OpenSSH
+    $ready = Test-SshdService
+}
+
+if (-not $ready) {
+    throw "Не удалось установить OpenSSH Server ни компонентом Windows, ни Win32-OpenSSH."
+}
+Write-Step "OpenSSH Server установлен, служба sshd найдена."
 
 # 4. Служба sshd
 Write-Step "Включаю службу sshd и автозапуск..."
