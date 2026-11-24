@@ -251,6 +251,17 @@ EOF
   netplan apply
 }
 
+apply_nmcli() {
+  local iface="$1" ip="$2"
+  local con="mgmt-${iface}"
+
+  log "NetworkManager: ${iface} → ${ip}/24 (без шлюза)"
+  nmcli connection delete "$con" >/dev/null 2>&1 || true
+  nmcli connection add type ethernet ifname "$iface" con-name "$con" \
+    ipv4.method manual ipv4.addresses "${ip}/24" ipv4.never-default yes
+  nmcli connection up "$con"
+}
+
 setup_mgmt_network() {
   local iface ip="${ROLE_IP}"
   local rc=0
@@ -273,7 +284,11 @@ setup_mgmt_network() {
     read -rp "Применить? [Y/n]: " ok
     [[ -z "$ok" || "$ok" =~ ^[Yy]$ ]] || { warn "Пропускаю настройку сети."; return 1; }
   fi
-  apply_netplan "$iface" "$ip"
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    apply_nmcli "$iface" "$ip"
+  else
+    apply_netplan "$iface" "$ip"
+  fi
 }
 
 # =====================================================================
